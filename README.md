@@ -13,6 +13,45 @@ Scanned diary pages and volunteer transcriptions are sourced from the **NSW Stat
 
 The volunteer transcriptions act as labelled ground truth for training and evaluating both pipelines.
 
+## Running the Scraper
+
+`scraper.py` collects paired page images and transcriptions from the archive. It
+respects the site's `robots.txt` (a mandatory 10-second crawl delay), only saves
+pages that have actually been transcribed, logs all activity to `scraper.log`,
+and **resumes automatically** — re-running skips anything already in `data/pairs.csv`.
+
+### Setup
+```bash
+pip install requests beautifulsoup4
+```
+
+### Commands
+```bash
+# Quick smoke test — 4 pages across 2 diaries (~2 min)
+python scraper.py --sample 4 --max-diaries 2
+
+# Collect a random sample of 5000 pages across all diaries (~30 hours)
+python scraper.py --sample 5000
+
+# Scrape a single diary (testing)
+python scraper.py --diary <DIARY_URL>
+
+# Crawl the entire archive
+python scraper.py
+```
+
+### Options
+| Flag | Description |
+|------|-------------|
+| `--sample N` | Randomly sample `N` transcribed pages spread across as many diaries as possible (maximum handwriting diversity) |
+| `--max-diaries M` | Use at most `M` diaries — scopes a smaller run or speeds up testing |
+| `--diary URL` | Scrape only one diary document |
+| `--limit N` | Stop after processing `N` pages |
+
+> **Note on runtime:** the 10-second crawl delay makes large runs slow — a full
+> 5000-page sample takes roughly 30 hours. Because the scraper resumes cleanly,
+> you can stop (`Ctrl + C`) and restart at any time without losing progress.
+
 ## Approach
 
 Two transcription pipelines are developed and benchmarked against each other:
