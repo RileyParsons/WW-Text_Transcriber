@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+env/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data files — large binaries and text; only the index CSV is tracked
+data/pages/*
+!data/pages/.gitkeep
+data/transcript/*
+!data/transcript/.gitkeep
+
+# Models — large binary files; only the folder structure is tracked
+models/*
+!models/.gitkeep
