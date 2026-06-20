@@ -25,8 +25,14 @@ Output:
     - pairs.csv updated with each downloaded pair (id, page_image_name,
       page_txt_name, download_source)
     - scraper.log records all progress, warnings, and errors
+
+USAGE:
+    python scraper.py                       # crawl the entire WW1 archive
+    python scraper.py --diary <URL>         # scrape a single diary (testing)
+    python scraper.py --diary <URL> --limit 3   # scrape at most 3 pages (quick test)
 """
 
+import argparse
 import csv
 import logging
 import re
@@ -63,6 +69,10 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger(__name__)
+
+
+class LimitReached(Exception):
+    """Raised to cleanly stop traversal once a --limit page cap is hit (used in testing)."""
 
 
 # ── robots.txt compliance ────────────────────────────────────────────────────
@@ -193,8 +203,9 @@ def next_row_id() -> int:
     if not PAIRS_CSV.exists():
         return 1
     with PAIRS_CSV.open(newline="", encoding="utf-8") as f:
-        # Subtract 1 to exclude the header row from the count
-        return max(1, sum(1 for _ in f) - 1 + 1)
+        # Total lines = 1 header + N data rows; the next id is N + 1, which
+        # equals the total line count, so return that directly (min 1)
+        return max(1, sum(1 for _ in f))
 
 
 # ── pairs.csv writer ─────────────────────────────────────────────────────────
@@ -208,14 +219,18 @@ def append_pair(row_id: int, image_name: str, txt_name: str, source_url: str) ->
 
 # ── Per-page processing ──────────────────────────────────────────────────────
 
-def process_page(page_url: str, rp: RobotFileParser, seen: set, current_id: list) -> None:
+def process_page(page_url: str, rp: RobotFileParser, seen: set, state: dict) -> None:
     """
     Fetch a single diary page, check its transcription status, and if transcribed:
       1. Download the full-resolution scanned image to data/pages/
       2. Write the transcription text to data/transcript/
       3. Append a row to pairs.csv
 
-    current_id is a single-element list [int] so it can be mutated across calls.
+    state is a dict carrying mutable run state across calls:
+      - "next_id":   next sequential id for pairs.csv
+      - "processed": number of pages actually fetched (for --limit / progress)
+      - "limit":     optional cap on pages to process (None = no cap)
+    Raises LimitReached once the processed count reaches the limit.
     """
     # Skip pages already downloaded in a previous run to support resuming
     if page_url in seen:
@@ -226,39 +241,59 @@ def process_page(page_url: str, rp: RobotFileParser, seen: set, current_id: list
     if soup is None:
         return
 
+    # Count this as a processed page now that it has been fetched, then enforce
+    # the optional --limit cap so test runs stop after a few pages
+    state["processed"] += 1
+    if state["limit"] is not None and state["processed"] >= state["limit"]:
+        # Process this page fully below, then signal the traversal to stop
+        _process_page_body(soup, page_url, rp, state)
+        log.info("Reached --limit of %d processed pages — stopping", state["limit"])
+        raise LimitReached
+    _process_page_body(soup, page_url, rp, state)
+
+
+def _process_page_body(soup, page_url: str, rp: RobotFileParser, state: dict) -> None:
+    """Extract status, transcription text and image for a fetched page, and save them."""
+
     # Derive a safe filename from the last URL path segment (the page slug)
     slug = page_url.rstrip("/").split("/")[-1]
 
-    # Check the full page text for skip conditions — if the page is not yet
-    # transcribed, there's nothing to download
-    page_text = soup.get_text(" ", strip=True).lower()
-    if "not yet started" in page_text or "not transcribed" in page_text:
-        log.info("SKIP (not transcribed): %s", slug)
+    # Read this page's own status field (NOT the navigation, which lists the
+    # status of every page in the diary). field-name-field-status holds the
+    # current page's workflow state, e.g. "Completed" or "Not yet started".
+    status = ""
+    status_field = soup.find("div", class_="field-name-field-status")
+    if status_field:
+        status_item = status_field.find("div", class_="field-item")
+        if status_item:
+            status = status_item.get_text(strip=True)
+
+    # Extract the transcription itself from the body field (field-name-body),
+    # which contains only this page's transcribed text — not the surrounding UI
+    body_field = soup.find("div", class_="field-name-body")
+    transcript_text = body_field.get_text("\n", strip=True) if body_field else ""
+
+    # Skip pages that have no transcription or are explicitly not transcribed,
+    # per the project requirement to only collect transcribed pages
+    if not transcript_text.strip() or "not transcribed" in transcript_text.lower():
+        log.info("SKIP (not transcribed, status=%r): %s", status or "unknown", slug)
         return
 
-    # Extract transcription text from the section after the "Transcription" heading
-    transcript_text = ""
-    trans_heading = soup.find(
-        lambda tag: tag.name in ("h2", "h3", "h4")
-        and "transcription" in tag.get_text().lower()
-    )
-    if trans_heading:
-        # Collect all sibling content until the next heading starts a new section
-        for sibling in trans_heading.find_next_siblings():
-            if sibling.name in ("h2", "h3", "h4"):
-                break
-            transcript_text += sibling.get_text(" ", strip=True) + "\n"
+    # The full-resolution scanned image is published as <link rel="image_src">
+    # in the page head (already without the thumbnail style prefix)
+    image_url = None
+    image_link = soup.find("link", rel="image_src")
+    if image_link and image_link.get("href"):
+        image_url = image_link["href"]
+    else:
+        # Fallback: derive full-res URL from a styled thumbnail <img> if present
+        img_tag = soup.find("img", src=re.compile(r"transcript_image", re.I))
+        if img_tag:
+            image_url = full_res_image_url(img_tag["src"])
 
-    if not transcript_text.strip():
-        log.warning("No transcription text found at %s — skipping", slug)
+    if not image_url:
+        log.warning("No image found at %s — skipping", slug)
         return
-
-    # Find the scanned image and convert its thumbnail URL to full resolution
-    img_tag = soup.find("img", src=re.compile(r"transcript_image", re.I))
-    if not img_tag:
-        log.warning("No image tag found at %s — skipping", slug)
-        return
-    image_url = full_res_image_url(img_tag["src"])
 
     # Build output file paths using the slug as the filename
     image_name = f"{slug}.jpg"
@@ -275,37 +310,70 @@ def process_page(page_url: str, rp: RobotFileParser, seen: set, current_id: list
     txt_path.write_text(transcript_text.strip(), encoding="utf-8")
 
     # Record the pair in pairs.csv and increment the ID counter for the next pair
-    row_id = current_id[0]
+    row_id = state["next_id"]
     append_pair(row_id, image_name, txt_name, page_url)
-    current_id[0] += 1
+    state["next_id"] += 1
 
     log.info("DOWNLOADED [id=%d]: %s", row_id, slug)
 
 
 # ── Diary traversal ──────────────────────────────────────────────────────────
 
-def scrape_diary(diary_url: str, rp: RobotFileParser, seen: set, current_id: list) -> None:
+def scrape_diary(diary_url: str, rp: RobotFileParser, seen: set, state: dict) -> None:
     """
     Traverse all paginated page listings within a single diary document
     and process each individual scanned page.
     """
     log.info("── Diary: %s", diary_url)
     for soup, _ in paginated_pages(diary_url, rp):
-        # Collect links to individual scanned pages within this diary
+        # Collect links to individual scanned pages within this diary.
+        # The same page is often linked twice (thumbnail + caption), so
+        # deduplicate per listing page to avoid processing it twice in one run.
         page_links = soup.find_all("a", href=re.compile(r"^/page/"))
+        seen_pages = set()
         for link in page_links:
             page_url = urljoin(BASE_URL, link["href"])
-            process_page(page_url, rp, seen, current_id)
+            if page_url not in seen_pages:
+                seen_pages.add(page_url)
+                process_page(page_url, rp, seen, state)
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
+def parse_args() -> argparse.Namespace:
+    """Parse command-line options for targeted test runs and full crawls."""
+    parser = argparse.ArgumentParser(
+        description="Scrape WW1 diary pages from the NSW State Library archive."
+    )
+    # --diary lets you test against a single diary instead of the whole archive
+    parser.add_argument(
+        "--diary",
+        metavar="URL",
+        help="Scrape only this single diary document URL (for testing). "
+             "If omitted, the entire WW1 diaries archive is crawled.",
+    )
+    # --limit caps how many pages are processed so test runs finish quickly
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Stop after processing N pages (for quick tests).",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
     """
-    Entry point: verify compliance, prepare output directories, then traverse
-    all ~959 diaries across the NSW State Library WW1 archive.
+    Entry point: verify compliance, prepare output directories, then either
+    crawl the whole WW1 archive or — when --diary is given — a single diary.
     """
+    args = parse_args()
     log.info("=== WW-Text-Transcriber scraper started ===")
+    if args.diary:
+        log.info("Single-diary test mode: %s", args.diary)
+    if args.limit:
+        log.info("Page limit: %d", args.limit)
 
     # Create output directories if they don't already exist
     PAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -317,29 +385,38 @@ def main() -> None:
     # Load already-downloaded source URLs to enable resume after interruption
     seen = load_downloaded_urls()
 
-    # Use a single-element list for the row ID counter so it can be mutated
-    # inside nested function calls without needing a global variable
-    current_id = [next_row_id()]
+    # Mutable run state shared across nested calls: next CSV id, processed-page
+    # count (for --limit and progress), and the optional page cap
+    state = {"next_id": next_row_id(), "processed": 0, "limit": args.limit}
 
-    # Walk through every page of the diary listing and process each diary found
     diary_count = 0
-    for soup, _ in paginated_pages(SECTION_URL, rp):
-        # Find all diary document links on this listing page
-        diary_links = soup.find_all("a", href=re.compile(r"^/document/"))
+    try:
+        if args.diary:
+            # Test mode — scrape just the one diary the user provided
+            scrape_diary(args.diary, rp, seen, state)
+            diary_count = 1
+        else:
+            # Full crawl — walk every page of the diary listing
+            for soup, _ in paginated_pages(SECTION_URL, rp):
+                # Find all diary document links on this listing page
+                diary_links = soup.find_all("a", href=re.compile(r"^/document/"))
 
-        # Deduplicate links — the same diary may appear multiple times on a page
-        seen_diaries = set()
-        for link in diary_links:
-            diary_url = urljoin(BASE_URL, link["href"])
-            if diary_url not in seen_diaries:
-                seen_diaries.add(diary_url)
-                scrape_diary(diary_url, rp, seen, current_id)
-                diary_count += 1
-                log.info("Diaries processed: %d | Pairs downloaded: %d",
-                         diary_count, current_id[0] - 1)
+                # Deduplicate links — the same diary may appear twice on a page
+                seen_diaries = set()
+                for link in diary_links:
+                    diary_url = urljoin(BASE_URL, link["href"])
+                    if diary_url not in seen_diaries:
+                        seen_diaries.add(diary_url)
+                        scrape_diary(diary_url, rp, seen, state)
+                        diary_count += 1
+                        log.info("Diaries processed: %d | Pairs downloaded: %d",
+                                 diary_count, state["next_id"] - 1)
+    except LimitReached:
+        # Expected during --limit test runs — stop cleanly without an error
+        pass
 
     log.info("=== Scraper complete. Diaries: %d | Total pairs: %d ===",
-             diary_count, current_id[0] - 1)
+             diary_count, state["next_id"] - 1)
 
 
 if __name__ == "__main__":
