@@ -28,13 +28,16 @@ Output:
 
 USAGE:
     python scraper.py                       # crawl the entire WW1 archive
+    python scraper.py --sample 5000         # sample 5000 pages across all diaries
     python scraper.py --diary <URL>         # scrape a single diary (testing)
     python scraper.py --diary <URL> --limit 3   # scrape at most 3 pages (quick test)
+    python scraper.py --sample 4 --max-diaries 2  # tiny sampling smoke test
 """
 
 import argparse
 import csv
 import logging
+import random
 import re
 import time
 from pathlib import Path
@@ -338,6 +341,137 @@ def scrape_diary(diary_url: str, rp: RobotFileParser, seen: set, state: dict) ->
                 process_page(page_url, rp, seen, state)
 
 
+# ── Random sampling across the whole archive ─────────────────────────────────
+
+def collect_diary_urls(rp: RobotFileParser, max_diaries: int | None = None) -> list:
+    """
+    Walk the WW1 diaries section listing and return a de-duplicated list of all
+    diary document URLs. Iterates ?page=N until a listing page yields no new
+    diaries, which is more robust than relying on 'next' link text.
+    max_diaries (optional) stops collection early once that many are found —
+    useful for scoping a smaller run or for a fast test.
+    """
+    urls, seen = [], set()
+    page = 0
+    while True:
+        # Page 0 is the bare section URL; subsequent pages use the ?page=N param
+        url = SECTION_URL if page == 0 else f"{SECTION_URL}?page={page}"
+        soup = fetch(url, rp)
+        if soup is None:
+            break
+
+        # Collect any diary document links not already seen on earlier pages
+        new = 0
+        for link in soup.find_all("a", href=re.compile(r"^/document/")):
+            diary_url = urljoin(BASE_URL, link["href"])
+            if diary_url not in seen:
+                seen.add(diary_url)
+                urls.append(diary_url)
+                new += 1
+
+        log.info("Section page %d: %d new diaries (total %d)", page, new, len(urls))
+
+        # Stop once we have enough, or when a page introduces no new diaries
+        if max_diaries is not None and len(urls) >= max_diaries:
+            return urls[:max_diaries]
+        if new == 0:
+            break
+        page += 1
+    return urls
+
+
+def diary_page_links(diary_url: str, rp: RobotFileParser) -> list:
+    """
+    Fetch the first listing page of a diary and return its individual page URLs,
+    shuffled. One fetch per diary keeps sampling overhead small; any pages from
+    a given diarist are equally useful for handwriting diversity.
+    """
+    soup = fetch(diary_url, rp)
+    if soup is None:
+        return []
+    links, seen = [], set()
+    for link in soup.find_all("a", href=re.compile(r"^/page/")):
+        page_url = urljoin(BASE_URL, link["href"])
+        if page_url not in seen:
+            seen.add(page_url)
+            links.append(page_url)
+    random.shuffle(links)
+    return links
+
+
+def run_sample(target: int, rp: RobotFileParser, seen: set, state: dict,
+               max_diaries: int | None = None) -> int:
+    """
+    Collect `target` transcribed pages sampled across as many diaries as
+    possible (maximum handwriting diversity). Returns the number downloaded.
+
+    Strategy:
+      1. Gather all diary URLs and shuffle them
+      2. Give each diary an even quota (target spread across all diaries)
+      3. Take up to the quota of transcribed pages from each diary
+      4. Top-up passes take extra pages from diaries that still have unused
+         page links, in case some quotas fell short (untranscribed/short diaries)
+    """
+    diaries = collect_diary_urls(rp, max_diaries)
+    if not diaries:
+        log.error("No diaries found — cannot sample")
+        return 0
+    random.shuffle(diaries)
+    log.info("Sampling %d pages across %d diaries", target, len(diaries))
+
+    # Even split of the target across every diary, e.g. 5000 / 959 → most get
+    # 5 and the first 205 get 6, summing to exactly `target`
+    base, extra = divmod(target, len(diaries))
+
+    # Cache each diary's remaining (unused) page links so top-up passes don't
+    # re-fetch listings
+    cache: dict[str, list] = {}
+    downloaded = 0
+
+    def take(diary_url: str, n: int) -> int:
+        """Download up to n transcribed pages from one diary; returns count taken."""
+        nonlocal downloaded
+        # Fetch and cache this diary's page links on first use
+        if diary_url not in cache:
+            cache[diary_url] = diary_page_links(diary_url, rp)
+        got = 0
+        while cache[diary_url] and got < n and downloaded < target:
+            page_url = cache[diary_url].pop()
+            before = state["next_id"]
+            process_page(page_url, rp, seen, state)
+            # next_id only advances when a pair was actually written, so this
+            # distinguishes a real download from a skip (untranscribed/resumed)
+            if state["next_id"] > before:
+                downloaded += 1
+                got += 1
+        return got
+
+    # Pass 1 — give each diary its even quota
+    for i, diary_url in enumerate(diaries):
+        if downloaded >= target:
+            break
+        quota = base + (1 if i < extra else 0)
+        if quota:
+            take(diary_url, quota)
+        log.info("Progress: %d/%d pages downloaded", downloaded, target)
+
+    # Top-up passes — keep taking one more from any diary with unused links
+    # until we reach the target or no diary has pages left to give
+    while downloaded < target and any(cache.get(d) for d in diaries):
+        progressed = False
+        for diary_url in diaries:
+            if downloaded >= target:
+                break
+            if cache.get(diary_url) and take(diary_url, 1) > 0:
+                progressed = True
+        if not progressed:
+            break
+
+    log.info("Sampling done: %d pages downloaded across %d diaries",
+             downloaded, len(cache))
+    return downloaded
+
+
 # ── Main entry point ─────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
@@ -360,6 +494,24 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help="Stop after processing N pages (for quick tests).",
     )
+    # --sample collects N transcribed pages spread across as many diaries as
+    # possible (maximum handwriting diversity)
+    parser.add_argument(
+        "--sample",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Randomly sample N transcribed pages across the whole archive.",
+    )
+    # --max-diaries caps how many diaries are collected/used — scopes a smaller
+    # run and makes --sample testable without crawling the full section listing
+    parser.add_argument(
+        "--max-diaries",
+        type=int,
+        default=None,
+        metavar="M",
+        help="Use at most M diaries (scoping / testing).",
+    )
     return parser.parse_args()
 
 
@@ -370,8 +522,12 @@ def main() -> None:
     """
     args = parse_args()
     log.info("=== WW-Text-Transcriber scraper started ===")
+    if args.sample:
+        log.info("Sample mode: %d pages (max diversity)", args.sample)
     if args.diary:
         log.info("Single-diary test mode: %s", args.diary)
+    if args.max_diaries:
+        log.info("Max diaries: %d", args.max_diaries)
     if args.limit:
         log.info("Page limit: %d", args.limit)
 
@@ -391,7 +547,10 @@ def main() -> None:
 
     diary_count = 0
     try:
-        if args.diary:
+        if args.sample:
+            # Random sampling mode — spread the sample across many diaries
+            run_sample(args.sample, rp, seen, state, args.max_diaries)
+        elif args.diary:
             # Test mode — scrape just the one diary the user provided
             scrape_diary(args.diary, rp, seen, state)
             diary_count = 1
@@ -415,8 +574,8 @@ def main() -> None:
         # Expected during --limit test runs — stop cleanly without an error
         pass
 
-    log.info("=== Scraper complete. Diaries: %d | Total pairs: %d ===",
-             diary_count, state["next_id"] - 1)
+    log.info("=== Scraper complete. Total pairs in csv: %d ===",
+             state["next_id"] - 1)
 
 
 if __name__ == "__main__":
