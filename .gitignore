@@ -13,6 +13,9 @@ build/
 .eggs/
 *.egg
 
+# Scraper log — can grow large and is not source code
+scraper.log
+
 # OS
 .DS_Store
 Thumbs.db
