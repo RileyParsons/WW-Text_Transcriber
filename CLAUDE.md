@@ -89,6 +89,12 @@ python scraper.py --sample 5000
 - **Remote:** `origin` → `https://github.com/RileyParsons/WW-Text_Transcriber.git`
 - **Default branch:** `main`
 
+> **Note on local path:** the project may be moved out of OneDrive (e.g. to
+> `C:\Users\rrpar\Projects\WW-Text-Transcriber`) so the ~3 GB of downloaded
+> training images are not synced to the cloud. Moving the whole folder (including
+> `.git`) preserves the GitHub connection and history — only the local path
+> changes. Do not assume the project lives under OneDrive.
+
 ## Workflow Rules
 
 1. Every code change must be committed with a meaningful message describing *why* the change was made
