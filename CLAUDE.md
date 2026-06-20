@@ -2,7 +2,11 @@
 
 ## Project Context
 
-This project is an exploration into AI-driven development for text transcription of historical handwritten documents. Specifically, it targets WW1 diary pages from the NSW State Library and uses the Claude vision API to generate transcriptions, which are then compared against human volunteer transcriptions as ground truth.
+This project is an exploration into AI-driven development for text transcription of historical handwritten documents, targeting WW1 diary pages from the NSW State Library.
+
+Two parallel transcription pipelines are maintained and benchmarked against each other:
+- **Primary pipeline** (`ml_pipeline.py`): Traditional CNN-based handwritten text recognition (CRNN architecture — CNN + BiLSTM + CTC loss), trained on the NSW State Library paired data
+- **Secondary pipeline** (`ai-transcription-pipeline.py`): Zero-shot transcription using the Claude vision API — no training required, used for comparison and benchmarking
 
 ## Data Source
 
@@ -40,8 +44,9 @@ Raw data files (`pages/` and `transcript/`) are gitignored due to size. Only `pa
 | File | Purpose |
 |------|---------|
 | `scraper.py` | Downloads page images and volunteer transcriptions from NSW State Library |
-| `ml_pipeline.py` | AI transcription pipeline using Claude vision API; evaluates against ground truth |
-| `models/` | Saved trained or fine-tuned transcription models (gitignored due to size) |
+| `ml_pipeline.py` | Primary pipeline — trains a CRNN (CNN + BiLSTM + CTC) model on paired data; evaluates with CER/WER |
+| `ai-transcription-pipeline.py` | Secondary pipeline — zero-shot transcription via Claude vision API; benchmarks against CNN results |
+| `models/` | Saved trained CNN model weights (gitignored due to size) |
 
 ## GitHub Repository
 
