@@ -56,6 +56,7 @@ CRAWL_DELAY = 10           # seconds between requests — required by robots.txt
 PAGES_DIR   = Path("data/pages")
 TRANS_DIR   = Path("data/transcript")
 PAIRS_CSV   = Path("data/pairs.csv")
+OUTLIERS_CSV = Path("data/outliers/outliers.csv")  # quarantined cover/blank/repeat pages
 LOG_FILE    = Path("scraper.log")
 
 
@@ -233,16 +234,29 @@ def paginated_pages(start_url: str, rp: RobotFileParser):
 
 def load_downloaded_urls() -> set:
     """
-    Read pairs.csv and return a set of download_source URLs already processed.
-    Allows the scraper to skip completed pages when restarted after interruption.
+    Return a set of download_source URLs that should be skipped without re-fetching:
+      - pages already saved (pairs.csv) — supports resuming after an interruption
+      - pages already quarantined as outliers (data/outliers/outliers.csv) — these
+        would be re-fetched then discarded by the outlier filter, so skipping them
+        up front avoids a wasted request and crawl delay each
     """
     seen = set()
+    # Pages already in the dataset — skip so a restart doesn't re-download them
     if PAIRS_CSV.exists():
         with PAIRS_CSV.open(newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 seen.add(row["download_source"])
-    log.info("Resume: %d pages already in pairs.csv — will skip these", len(seen))
+    done = len(seen)
+    # Known outliers — skip so revisiting them costs no fetch (they would be
+    # filtered out anyway by is_outlier_transcription)
+    if OUTLIERS_CSV.exists():
+        with OUTLIERS_CSV.open(newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                seen.add(row["download_source"])
+    log.info("Resume: %d pages in pairs.csv + %d known outliers — will skip these",
+             done, len(seen) - done)
     return seen
 
 
