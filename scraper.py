@@ -158,6 +158,54 @@ def full_res_image_url(thumbnail_url: str) -> str:
     return re.sub(r"/styles/[^/]+/public/", "/", thumbnail_url)
 
 
+# ── Outlier filtering (covers, blank pages, repeats, junk) ───────────────────
+
+# Volunteers annotate non-content pages with bracketed editorial notes instead of
+# real transcribed handwriting. Such pages — diary covers, blank pages, pages whose
+# text was transcribed elsewhere ("repeats"), or spreadsheet error values — carry no
+# handwriting for the CNN to learn from. If saved, the image and text would not
+# correspond, so they are treated as outliers and never written to the dataset.
+
+# Matches a line that is purely a [Page N] position marker — not transcribed content
+_PAGE_MARKER_RE = re.compile(r"^\[?\s*page\s+\d+\s*[\].]?$", re.I)
+
+# Matches a line that is purely an editorial marker for a non-content page
+_NON_CONTENT_RE = re.compile(
+    r"""^\[?\s*(
+          (inside\s+|outside\s+|front\s+|back\s+)?cover(\s+of\s+diary)?   # covers
+        | spine | fly\s*leaf | end\s*paper                                # binding
+        | (this\s+page\s+is\s+|remainder\s+of\s+page\s+|page\s+)?blank(\s+page)?  # blanks
+        | transcribed\s+on\s+(previous|next)\s+page                       # repeats
+        | (see|repeat\s+of|duplicate\s+of|same\s+as)\s+(previous|next|page)\b.*  # repeats
+        | n/?a                                                            # error value
+      )\s*[\].]?$""",
+    re.I | re.X,
+)
+
+
+def is_outlier_transcription(text: str) -> bool:
+    """
+    Return True if a transcription has no real handwriting content — i.e. every
+    line is blank, a '#N/A' spreadsheet error, a [Page N] position marker, or an
+    editorial marker (cover / blank page / 'transcribed on previous page').
+
+    These are outlier pages (covers, blanks, repeats) whose image and text would
+    not correspond, so they must be kept out of the training set.
+    """
+    for raw in text.splitlines():
+        line = raw.strip()
+        # Ignore empty lines and spreadsheet error placeholders (e.g. "#N/A")
+        if not line or line.upper().lstrip("#") in ("N/A", "NA"):
+            continue
+        # Ignore page-position markers and editorial non-content markers
+        if _PAGE_MARKER_RE.match(line) or _NON_CONTENT_RE.match(line):
+            continue
+        # Any other line is genuine transcribed text → this page is NOT an outlier
+        return False
+    # Nothing but markers / blank lines remained → no real content to train on
+    return True
+
+
 # ── Pagination helper ────────────────────────────────────────────────────────
 
 def paginated_pages(start_url: str, rp: RobotFileParser):
@@ -280,6 +328,13 @@ def _process_page_body(soup, page_url: str, rp: RobotFileParser, state: dict) ->
     # per the project requirement to only collect transcribed pages
     if not transcript_text.strip() or "not transcribed" in transcript_text.lower():
         log.info("SKIP (not transcribed, status=%r): %s", status or "unknown", slug)
+        return
+
+    # Skip outlier pages (covers, blank pages, repeats, "#N/A") whose transcription
+    # is only an editorial marker — their image and text would not correspond and
+    # would pollute the training set with non-handwriting examples
+    if is_outlier_transcription(transcript_text):
+        log.info("SKIP (outlier — cover/blank/repeat): %s", slug)
         return
 
     # The full-resolution scanned image is published as <link rel="image_src">

@@ -67,6 +67,12 @@ python scraper.py --sample 5000
 - **Skip logic:** only saves pages whose transcription body has text and does
   **not** contain "not transcribed" — this is checked on the page's own
   `field-name-body` element, not the navigation (which lists every page's status)
+- **Outlier filtering:** pages whose transcription is only an editorial marker —
+  diary covers (`[Cover]`), blank pages (`[blank page]`), repeats
+  (`[Transcribed on previous page]`, `[Duplicate of page N]`) or `#N/A` — carry no
+  handwriting and are skipped via `is_outlier_transcription()`. The same function
+  backs `clean_dataset.py`, which removes such outliers from an existing dataset
+  (moving them to `data/outliers/`, gitignored) and re-numbers `pairs.csv`
 - **Runtime:** the crawl delay makes a full 5000-page sample take **~30 hours**
 - **Resume:** re-running skips pages already listed in `data/pairs.csv`, so runs
   can be interrupted (`Ctrl + C`) and restarted freely

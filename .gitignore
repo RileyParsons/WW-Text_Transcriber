@@ -31,6 +31,9 @@ data/pages/*
 data/transcript/*
 !data/transcript/.gitkeep
 
+# Quarantined outlier pages (covers/blanks/repeats) moved out of the dataset
+data/outliers/
+
 # Models — large binary files; only the folder structure is tracked
 models/*
 !models/.gitkeep
