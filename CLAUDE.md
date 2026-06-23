@@ -84,9 +84,41 @@ python scraper.py --sample 5000
 | File | Purpose |
 |------|---------|
 | `scraper.py` | Downloads page images and volunteer transcriptions from NSW State Library |
+| `segmentation.py` | Page→line segmentation (`segment_page_to_lines`) — detects text lines on a page and returns ordered crops; consumed by `ml_pipeline.py` |
 | `ml_pipeline.py` | Primary pipeline — trains a CRNN (CNN + BiLSTM + CTC) model on paired data; evaluates with CER/WER |
 | `ai-transcription-pipeline.py` | Secondary pipeline — zero-shot transcription via Claude vision API; benchmarks against CNN results |
 | `models/` | Saved trained CNN model weights (gitignored due to size) |
+
+## ML Pipeline Architecture (`ml_pipeline.py`)
+
+The CRNN (CNN + BiLSTM + CTC) recognises **one text line at a time**, but the
+labels in `data/pairs.csv` are **page-level** transcriptions. The pipeline
+therefore bridges page → line before recognition:
+
+- **Stage 0 — Segment:** `segment_page_to_lines()` (in `segmentation.py`,
+  imported by `ml_pipeline.py`) detects text-line bounding boxes on a page and
+  returns ordered (top-to-bottom) line crops. Two candidate approaches: classic
+  CV (binarise + projection profiles — no deps, brittle on slanted/dense hands)
+  or a learned detector (Kraken / docTR — robust on historical layouts, adds a
+  model). **Decision still open.**
+- **Label alignment:** `build_line_label_pairs()` maps the *Nth crop to the Nth
+  non-empty transcript line by order* (we don't know which text belongs to which
+  line). Pages where line/text counts diverge badly are **dropped** rather than
+  trained on scrambled labels. This order-alignment is the **single biggest
+  source of label noise** in the pipeline.
+- **Train/eval boundary:** split train/val **by page** (never leak lines from the
+  same page across the split). Recognition is line-level; `predict_page()` joins
+  per-line predictions back with newlines, and CER/WER are scored **at page
+  level** so results stay comparable to the Claude vision baseline.
+
+Candidate libraries: **PyTorch** (CRNN + `torch.nn.CTCLoss`), **OpenCV** (line
+preprocessing), **Albumentations** (augmentation across the ~959 hands),
+**jiwer** (CER/WER), optional **Kraken/docTR** (segmentation) or **TrOCR** (a
+transformer alternative with a higher accuracy ceiling).
+
+> Current state: `ml_pipeline.py` is an architecture **scaffold** — data-flow
+> wiring (`load_pairs`, `build_charset`) is real; segmentation, the CRNN model,
+> training, inference and evaluation are `NotImplementedError`/`TODO` stubs.
 
 ## GitHub Repository
 
