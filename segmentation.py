@@ -35,7 +35,73 @@ Whichever backend is chosen, the ordering contract below MUST hold.
 # implementation so this module stays importable for inspecting the pipeline
 # structure without the full stack installed.
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Path to the Kraken baseline segmentation model. Kraken ships a pretrained
+# default ("blla.mlmodel") inside the installed package; leave this as None to
+# use it, or point it at a model fine-tuned on our own diary pages (e.g. trained
+# via eScriptorium) to override.
+SEG_MODEL_PATH: Optional[Path] = None
+
+# Process-wide cache for the loaded segmentation model. Loading the VGSL/torch
+# model is expensive, and segmentation runs over thousands of pages, so we load
+# it once and reuse it rather than reloading per page.
+_SEG_MODEL = None
+
+
+def _load_seg_model():
+    """Load (and memoise) the Kraken baseline segmentation model.
+
+    Uses SEG_MODEL_PATH when set, otherwise the default 'blla.mlmodel' bundled
+    with the kraken package. The loaded model is cached so subsequent calls are
+    free.
+    """
+    # Return the already-loaded model on every call after the first.
+    global _SEG_MODEL
+    if _SEG_MODEL is not None:
+        return _SEG_MODEL
+
+    # Imported lazily so importing this module never requires kraken installed.
+    from kraken.lib import vgsl
+
+    # Resolve the model path: explicit override, else kraken's packaged default.
+    if SEG_MODEL_PATH is not None:
+        model_path = str(SEG_MODEL_PATH)
+    else:
+        # The default baseline model ships as a data file inside the kraken pkg.
+        from importlib.resources import files
+        model_path = str(files("kraken") / "blla.mlmodel")
+
+    # Load the VGSL-defined torch model once and cache it for reuse.
+    _SEG_MODEL = vgsl.TorchVGSLModel.load_model(model_path)
+    return _SEG_MODEL
+
+
+def _boundary_top_y(record) -> float:
+    """Return the top-most y-coordinate of a segmented line's boundary polygon.
+
+    Used as a sort key to enforce strict top-to-bottom ordering. Handles both
+    the kraken 4.x dict line records ({'boundary': [[x, y], ...]}) and the 5.x
+    BaselineLine objects (record.boundary); falls back to +inf when no boundary
+    is present so degenerate lines sort last rather than crash.
+    """
+    # Read the boundary polygon from either a dict record or an object record.
+    if isinstance(record, dict):
+        boundary = record.get("boundary")
+    else:
+        boundary = getattr(record, "boundary", None)
+
+    # No usable boundary -> push this line to the end of the ordering.
+    if not boundary:
+        return float("inf")
+
+    # The polygon is a list of [x, y] points; the line's top is the smallest y.
+    return min(point[1] for point in boundary)
 
 
 def segment_page_to_lines(page_image_path: Path) -> List["object"]:
@@ -49,6 +115,34 @@ def segment_page_to_lines(page_image_path: Path) -> List["object"]:
     transcript lines purely by index — a misordered crop silently mislabels a
     training example.
     """
-    # TODO: load page_image_path, detect line bounding boxes/baselines, crop and
-    #       return them sorted by top y-coordinate.
-    raise NotImplementedError("Line segmentation not yet implemented")
+    # Lazy heavy imports (kraken pulls in torch); keeps module import cheap so
+    # ml_pipeline.py can import this module without the full vision stack.
+    import numpy as np
+    from PIL import Image
+    from kraken import blla
+    from kraken.lib.segmentation import extract_polygons
+
+    # Load the page as a PIL image. blla expects PIL input; RGB is the safe mode.
+    im = Image.open(page_image_path).convert("RGB")
+
+    # Run baseline segmentation. The result's `lines` each carry a `baseline`
+    # polyline and a `boundary` polygon, ordered by kraken's reading-order
+    # heuristic (polygonal_reading_order).
+    seg = blla.segment(im, model=_load_seg_model())
+
+    # extract_polygons crops each line's boundary polygon AND dewarps it to a
+    # horizontal strip, yielding (PIL line image, line record) in seg order.
+    # We keep the record alongside each crop so we can sort by vertical position.
+    crops_with_records = [
+        (np.asarray(line_img), record)
+        for line_img, record in extract_polygons(im, seg)
+    ]
+
+    # Guard the ordering contract: re-sort strictly top-to-bottom by each line's
+    # boundary top-y. extract_polygons already preserves seg order, but this
+    # protects the index-based alignment in build_line_label_pairs() on noisy or
+    # multi-column pages where the reading-order heuristic may diverge.
+    crops_with_records.sort(key=lambda pair: _boundary_top_y(pair[1]))
+
+    # Return just the ordered crops (drop the records now ordering is applied).
+    return [crop for crop, _record in crops_with_records]
