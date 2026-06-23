@@ -96,11 +96,13 @@ labels in `data/pairs.csv` are **page-level** transcriptions. The pipeline
 therefore bridges page → line before recognition:
 
 - **Stage 0 — Segment:** `segment_page_to_lines()` (in `segmentation.py`,
-  imported by `ml_pipeline.py`) detects text-line bounding boxes on a page and
-  returns ordered (top-to-bottom) line crops. Two candidate approaches: classic
-  CV (binarise + projection profiles — no deps, brittle on slanted/dense hands)
-  or a learned detector (Kraken / docTR — robust on historical layouts, adds a
-  model). **Decision still open.**
+  imported by `ml_pipeline.py`) detects text lines on a page and returns ordered
+  (top-to-bottom) line crops. **Implemented with classic OpenCV** (adaptive
+  binarise → horizontal projection profile → line bands → crop): only
+  opencv-python + numpy, no torch/weights, installs natively on Windows. Tunable
+  via module constants (`BINARIZE_*`, `ROW_INK_THRESHOLD_FRAC`, `MIN_LINE_HEIGHT`,
+  `LINE_PAD`). Brittle on heavily slanted/touching hands; a learned detector
+  (Kraken `blla` / docTR) is the higher-accuracy fallback if needed.
 - **Label alignment:** `build_line_label_pairs()` maps the *Nth crop to the Nth
   non-empty transcript line by order* (we don't know which text belongs to which
   line). Pages where line/text counts diverge badly are **dropped** rather than
