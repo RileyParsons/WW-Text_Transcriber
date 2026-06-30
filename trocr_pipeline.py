@@ -167,8 +167,10 @@ def recognise_lines(line_images: List["object"], processor, model, device) -> Li
     pixel_values = processor(images=pil_lines, return_tensors="pt").pixel_values.to(device)
 
     # Greedy decode each line; no_grad keeps memory/compute down at inference.
+    # max_new_tokens is set explicitly because the model's default cap (21
+    # tokens) silently truncates longer handwritten lines mid-sentence.
     with torch.no_grad():
-        generated_ids = model.generate(pixel_values)
+        generated_ids = model.generate(pixel_values, max_new_tokens=64)
 
     # Decode token ids back to strings, dropping special tokens.
     return processor.batch_decode(generated_ids, skip_special_tokens=True)
