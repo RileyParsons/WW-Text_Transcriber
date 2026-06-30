@@ -222,8 +222,19 @@ def main():
     args = ap.parse_args()
 
     # Heavy imports now that we are actually training.
+    import csv
+    import time
     import torch
     from torch.utils.data import DataLoader
+
+    # Create the output dir up front and open a metrics log so every epoch's
+    # numbers are persisted to disk (they survive the terminal closing, unlike
+    # the printed lines). Header is written once; rows are appended per epoch.
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    metrics_path = OUTPUT_DIR / "metrics.csv"
+    if not metrics_path.exists():
+        with metrics_path.open("w", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow(["timestamp", "epoch", "train_loss", "val_cer", "val_wer", "best"])
 
     # Load and (optionally) cap the dataset, then split by page.
     rows = load_pairs()
@@ -299,12 +310,20 @@ def main():
         avg_loss = running_loss / max(1, len(train_loader))
         print(f"[epoch {epoch}] train_loss {avg_loss:.4f}  val_CER {mean_cer:.2%}  val_WER {mean_wer:.2%}")
 
-        if mean_cer < best_cer:
+        # Checkpoint only on genuine improvement; note it for the metrics row.
+        improved = mean_cer < best_cer
+        if improved:
             best_cer = mean_cer
-            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(OUTPUT_DIR)
             processor.save_pretrained(OUTPUT_DIR)
             print(f"  saved new best (CER {mean_cer:.2%}) -> {OUTPUT_DIR}")
+
+        # Append this epoch's metrics so the full training curve is on disk.
+        with metrics_path.open("a", newline="", encoding="utf-8") as fh:
+            csv.writer(fh).writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"), epoch,
+                f"{avg_loss:.4f}", f"{mean_cer:.4f}", f"{mean_wer:.4f}", int(improved),
+            ])
 
         # Honour --max-steps across epochs too.
         if args.max_steps and global_step >= args.max_steps:
