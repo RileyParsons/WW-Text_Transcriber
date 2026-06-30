@@ -37,3 +37,7 @@ data/outliers/
 # Models — large binary files; only the folder structure is tracked
 models/*
 !models/.gitkeep
+
+# Segmentation test — keep the runner script and text summaries, ignore the
+# per-page line-crop PNGs (regenerable binary output)
+segmentation_test/page_*/

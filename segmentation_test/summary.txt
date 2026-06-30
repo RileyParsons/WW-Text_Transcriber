@@ -1,0 +1,7 @@
+page  crops  text  verdict                 image
+------------------------------------------------
+   1      3     9  DROP (counts diverge)   item-09-general-william-holmes-notebook-ca-1914-page-9.jpg
+   2     26    24  keep                    item-09-general-william-holmes-notebook-ca-1914-page-6.jpg
+   3     13    11  keep                    item-09-general-william-holmes-notebook-ca-1914-page-7.jpg
+   4      0    24  DROP (counts diverge)   item-09-general-william-holmes-notebook-ca-1914-page-4.jpg
+   5     19     4  DROP (counts diverge)   item-04-fred-harold-tomlins-war-diary-19-december-1915-18-march-1916-page-11.jpg

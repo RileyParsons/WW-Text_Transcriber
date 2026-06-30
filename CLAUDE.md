@@ -122,6 +122,28 @@ transformer alternative with a higher accuracy ceiling).
 > wiring (`load_pairs`, `build_charset`) is real; segmentation, the CRNN model,
 > training, inference and evaluation are `NotImplementedError`/`TODO` stubs.
 
+### Finding (2026-06-30): the transcripts are NOT line-aligned
+
+A 100-page random benchmark of the OpenCV segmenter
+(`segmentation_test/run_segmentation_test.py`, seed 0) gave only a **16%
+keep-rate** under `build_line_label_pairs()`'s count rule — 68% of pages were
+"over-split" (many more line crops than transcript lines). Inspecting those
+transcripts showed the cause is **the label format, not the segmenter**: the
+volunteer transcripts are **page-level prose** — one soft-wrapped paragraph per
+diary entry/date — **not one line per physical handwritten line**. E.g. a page
+with ~20 lines of handwriting has a 3-line transcript (3 paragraphs).
+
+**Consequence:** the *Nth crop ↔ Nth transcript line* alignment that the CRNN
+path depends on is **broken by construction**, not merely noisy. No segmenter
+(OpenCV, Kraken, docTR) can raise the keep-rate, because there are no
+per-physical-line labels to align crops to. The line-level CRNN design is
+therefore stalled pending a label strategy that fits page-level prose.
+
+**Chosen direction:** move to a **page-level model — TrOCR** (image of a
+page/region → full text), which learns reading order itself and needs **no line
+alignment**, fitting the prose labels directly. The CRNN + segmentation code is
+retained for benchmarking but is no longer the primary path.
+
 ## GitHub Repository
 
 - **Repo name:** `WW-Text_Transcriber`
