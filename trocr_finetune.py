@@ -212,6 +212,8 @@ def main():
     ap.add_argument("--grad-accum", type=int, default=8, help="steps to accumulate before optimiser step")
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--val-frac", type=float, default=0.1)
+    ap.add_argument("--eval-pages", type=int, default=0,
+                    help="cap val pages scored each epoch (0 = all); a subset gives a faster, slightly noisier CER")
     ap.add_argument("--max-target-length", type=int, default=256, help="max label tokens (page prose can be long)")
     ap.add_argument("--max-new-tokens", type=int, default=256, help="generation cap during eval")
     ap.add_argument("--fp16", action="store_true", help="mixed-precision training (saves VRAM)")
@@ -228,13 +230,21 @@ def main():
     if args.limit:
         rows = rows[: args.limit]
     train_rows, val_rows = split_by_page(rows, args.val_frac, args.seed)
-    print(f"pages: {len(rows)} total -> {len(train_rows)} train / {len(val_rows)} val")
+
+    # Optionally score only a fixed subset of the val set each epoch — full
+    # autoregressive eval costs ~3x training, so a capped, deterministic subset
+    # (sliced from the already-shuffled val split) slashes wall time at the cost
+    # of a slightly noisier CER curve. The held-out pages are untouched by
+    # training, so the subset stays a valid validation signal.
+    eval_rows = val_rows[: args.eval_pages] if args.eval_pages else val_rows
+    print(f"pages: {len(rows)} total -> {len(train_rows)} train / {len(val_rows)} val "
+          f"({len(eval_rows)} scored each epoch)")
 
     # Load model + processor and build the datasets/loaders.
     processor, model, device = load_model(args.model)
     PageDataset = build_dataset_cls()
     train_ds = PageDataset(train_rows, processor, args.max_target_length)
-    val_ds = PageDataset(val_rows, processor, args.max_target_length)
+    val_ds = PageDataset(eval_rows, processor, args.max_target_length)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size)
     print(f"device: {device} | fp16: {args.fp16}")
